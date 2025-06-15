@@ -25,6 +25,7 @@
     "burner-connector": "0.0.14",
     "cofhejs": "^0.3.0",
     "daisyui": "5.0.9",
+    "framer-motion": "^12.18.1",
     "kubo-rpc-client": "~5.0.2",
     "next": "~15.2.3",
     "next-nprogress-bar": "~2.3.13",

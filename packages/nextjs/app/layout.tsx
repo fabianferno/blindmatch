@@ -12,7 +12,7 @@ const ScaffoldEthApp = ({ children }: { children: React.ReactNode }) => {
       <body className="">
         <ThemeProvider enableSystem>
           <ScaffoldEthAppWithProviders>
-            <div className="filter hue-rotate-60">{children}</div>
+            <div className="filter contrast-200 saturate-150 brightness-125 hue-rotate-30">{children}</div>
           </ScaffoldEthAppWithProviders>
         </ThemeProvider>
       </body>

@@ -1,6 +1,6 @@
 "use client";
 
-import { FHECounterComponent } from "./FHECounterComponent";
+import { BlindMatchComponent } from "./BlindMatchComponent";
 import type { NextPage } from "next";
 import { useAccount } from "wagmi";
 import { Address } from "~~/components/scaffold-eth";
@@ -49,7 +49,7 @@ const Home: NextPage = () => {
 
         <div className="grow bg-base-300 w-full mt-16 px-8 py-12">
           <div className="flex justify-center items-center gap-12 flex-col md:flex-row">
-            <FHECounterComponent />
+            <BlindMatchComponent />
           </div>
         </div>
       </div>

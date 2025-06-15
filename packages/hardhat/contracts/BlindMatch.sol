@@ -1,31 +1,19 @@
-// SPDX-License-Identifier: UNLICENSED
-pragma solidity ^0.8.25;
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.19;
 
 import "@fhenixprotocol/cofhe-contracts/FHE.sol";
 
-interface IOracle {
-    function requestDecryption(
-        uint32 value,
-        bytes4 callbackSelector,
-        bytes32 requestId,
-        uint256 deadline
-    ) external returns (uint256);
-}
-
-// import "@fhenixprotocol/cofhe-contracts/OracleCaller.sol"; // Removed, not found in package
-
-// contract BlindMatch is OracleCaller {
 contract BlindMatch {
-    // Interest categories (32 interests as specified)
-    uint8 public constant TOTAL_INTERESTS = 32;
-    uint8 public constant MIN_INTERESTS = 16;
+    // Interest categories (8 interests for gas efficiency)
+    uint8 public constant TOTAL_INTERESTS = 8;
+    uint8 public constant MIN_INTERESTS = 4;
 
-    // Similarity threshold for matching (out of MIN_INTERESTS)
-    uint8 public constant MATCH_THRESHOLD = 8; // 50% similarity
+    // Similarity threshold for matching (out of 8 possible common interests)
+    uint8 public constant MATCH_THRESHOLD = 3; // ~38% similarity (3 out of 8)
 
     struct UserProfile {
         bool exists;
-        euint32 interestsBitmap; // 32-bit encrypted bitmap of interests
+        euint8 interestsBitmap; // 8-bit encrypted bitmap of interests
         address[] matches;
         uint256 profileCreatedAt;
     }
@@ -34,16 +22,17 @@ contract BlindMatch {
         address requester;
         address target;
         euint8 similarityScore;
+        bool scoreDecrypted;
+        uint8 decryptedScore;
         bool processed;
         uint256 timestamp;
-        bool isMatch;
+        ebool isMatchEncrypted;
         bool matchDecrypted;
+        bool isMatch;
     }
 
     mapping(address => UserProfile) public profiles;
     mapping(bytes32 => MatchRequest) public matchRequests;
-    mapping(uint256 => bytes32) public pendingDecryptions;
-
     address[] public allUsers;
 
     // Events
@@ -51,46 +40,10 @@ contract BlindMatch {
     event MatchRequested(address indexed requester, address indexed target, bytes32 requestId);
     event MatchFound(address indexed user1, address indexed user2, uint256 timestamp);
     event SimilarityCalculated(address indexed user1, address indexed user2, bytes32 requestId);
-    event DecryptionRequested(bytes32 indexed requestId, uint256 decryptionId);
-    event DecryptionCompleted(bytes32 indexed requestId, bool isMatch);
-
-    // Interest categories for reference (not used in contract logic)
-    string[32] public interestCategories = [
-        "Travel",
-        "Music",
-        "Fitness / Gym",
-        "Movies & TV",
-        "Outdoors / Hiking",
-        "Pets / Animals",
-        "Reading / Books",
-        "Cooking / Foodie",
-        "Art & Museums",
-        "Gaming (video)",
-        "Dancing",
-        "Photography",
-        "Nightlife / Bars",
-        "Live Sports",
-        "Podcasts",
-        "Comedy",
-        "Board Games",
-        "Fashion",
-        "Coffee & Cafes",
-        "Craft Beer / Wine",
-        "Sustainability / Climate",
-        "Spirituality / Mindfulness",
-        "Crypto / Web3",
-        "Volunteering",
-        "Tech & Gadgets",
-        "Entrepreneurship",
-        "Languages & Culture",
-        "Astrology",
-        "Politics & Civic Issues",
-        "Parenting",
-        "DIY / Woodwork",
-        "Tattoos & Piercings"
-    ];
-
-    address public oracle;
+    event MatchDecryptionRequested(bytes32 indexed requestId);
+    event ScoreDecryptionRequested(bytes32 indexed requestId);
+    event MatchDecrypted(bytes32 indexed requestId, bool isMatch);
+    event ScoreDecrypted(bytes32 indexed requestId, uint8 score);
 
     modifier onlyRegisteredUser() {
         require(profiles[msg.sender].exists, "User not registered");
@@ -102,25 +55,15 @@ contract BlindMatch {
         _;
     }
 
-    modifier onlyOracle() {
-        require(msg.sender == oracle, "Only oracle can call this function");
-        _;
-    }
-
-    function setOracle(address _oracle) public {
-        // In production, restrict this to onlyOwner or constructor
-        oracle = _oracle;
-    }
-
     /**
      * @dev Submit user profile with encrypted interests bitmap
-     * @param encryptedInterests 32-bit encrypted bitmap representing user's interests
+     * @param encryptedInterests 8-bit encrypted bitmap representing user's interests
      */
-    function submitProfile(InEuint32 calldata encryptedInterests) external {
+    function submitProfile(InEuint8 calldata encryptedInterests) external {
         require(!profiles[msg.sender].exists, "Profile already exists");
 
-        euint32 interests = FHE.asEuint32(encryptedInterests);
-        FHE.allowThis(interests);
+        euint8 interests = FHE.asEuint8(encryptedInterests);
+        FHE.allowThis(interests); // Grant access to this contract
 
         profiles[msg.sender] = UserProfile({
             exists: true,
@@ -130,78 +73,132 @@ contract BlindMatch {
         });
 
         allUsers.push(msg.sender);
-
         emit ProfileCreated(msg.sender, block.timestamp);
     }
 
     /**
-     * @dev Calculate similarity and process match in a single transaction
+     * @dev Calculate similarity between two users using encrypted bitwise operations
      * @param targetUser Address of the user to compare with
      * @return requestId The ID of the match request
      */
-    function calculateAndMatch(
+    function calculateSimilarity(
         address targetUser
     ) external onlyRegisteredUser userExists(targetUser) returns (bytes32 requestId) {
         require(targetUser != msg.sender, "Cannot match with yourself");
         require(!isAlreadyMatched(msg.sender, targetUser), "Users already matched");
 
+        return _calculateSimilarity(msg.sender, targetUser);
+    }
+
+    function _calculateSimilarity(address requester, address targetUser) internal returns (bytes32 requestId) {
         // Get both users' interest bitmaps
-        euint32 myInterests = profiles[msg.sender].interestsBitmap;
-        euint32 theirInterests = profiles[targetUser].interestsBitmap;
+        euint8 myInterests = profiles[requester].interestsBitmap;
+        euint8 theirInterests = profiles[targetUser].interestsBitmap;
 
-        // Calculate similarity using FHE operations
-        // Count common interests using AND operation (both users have the interest)
-        euint32 commonInterests = FHE.mul(myInterests, theirInterests);
+        // Calculate common interests using bitwise AND
+        euint8 commonInterestsBitmap = FHE.and(myInterests, theirInterests);
+        FHE.allowThis(commonInterestsBitmap);
 
-        // Convert to smaller type for efficiency
-        euint8 similarityScore = FHE.asEuint8(commonInterests);
+        // Count the number of set bits (common interests) using efficient bit counting
+        euint8 similarityScore = _countSetBits(commonInterestsBitmap);
         FHE.allowThis(similarityScore);
 
-        // Check if similarity meets threshold
+        // Check if similarity meets threshold for matching
         euint8 threshold = FHE.asEuint8(MATCH_THRESHOLD);
+        FHE.allowThis(threshold);
         ebool isMatchEncrypted = FHE.gte(similarityScore, threshold);
-
         FHE.allowThis(isMatchEncrypted);
 
         // Generate request ID
-        requestId = keccak256(abi.encodePacked(msg.sender, targetUser, block.timestamp));
+        requestId = keccak256(abi.encodePacked(requester, targetUser, block.timestamp, block.number));
 
         // Store the match request
         matchRequests[requestId] = MatchRequest({
-            requester: msg.sender,
+            requester: requester,
             target: targetUser,
             similarityScore: similarityScore,
+            scoreDecrypted: false,
+            decryptedScore: 0,
             processed: true,
             timestamp: block.timestamp,
-            isMatch: false,
-            matchDecrypted: false
+            isMatchEncrypted: isMatchEncrypted,
+            matchDecrypted: false,
+            isMatch: false
         });
 
-        // Request decryption of the match result
-        // Assumes oracle is a contract with requestDecryption function
-        uint256 decryptionId = IOracle(oracle).requestDecryption(
-            uint32(uint256(uint160(bytes20(abi.encodePacked(isMatchEncrypted))))),
-            this.handleMatchDecryption.selector,
-            requestId,
-            block.timestamp + 100
-        );
-
-        pendingDecryptions[decryptionId] = requestId;
-
-        emit DecryptionRequested(requestId, decryptionId);
-        emit SimilarityCalculated(msg.sender, targetUser, requestId);
-
+        emit SimilarityCalculated(requester, targetUser, requestId);
         return requestId;
     }
 
     /**
-     * @dev Callback function for handling match decryption results
-     * @param requestId The ID of the match request
-     * @param isMatch The decrypted match result
+     * @dev Count set bits in an 8-bit encrypted integer using efficient FHE operations
+     * Much more gas-efficient than the 32-bit version
      */
-    function handleMatchDecryption(bytes32 requestId, bool isMatch) external onlyOracle {
+    function _countSetBits(euint8 value) internal returns (euint8) {
+        euint8 count = FHE.asEuint8(0);
+        euint8 temp = value;
+        FHE.allowThis(count);
+        FHE.allowThis(temp);
+
+        // Check each bit position (only 8 iterations now!)
+        for (uint8 i = 0; i < 8; i++) {
+            euint8 bitMask = FHE.asEuint8(1 << i);
+            euint8 bitValue = FHE.and(temp, bitMask);
+
+            // Check if bit is set (non-zero)
+            ebool bitIsSet = FHE.gt(bitValue, FHE.asEuint8(0));
+            euint8 addValue = FHE.select(bitIsSet, FHE.asEuint8(1), FHE.asEuint8(0));
+            count = FHE.add(count, addValue);
+            FHE.allowThis(count);
+        }
+
+        return count;
+    }
+
+    /**
+     * @dev Request decryption of match result (whether users match)
+     * @param requestId The ID of the match request
+     */
+    function requestMatchDecryption(bytes32 requestId) external {
         MatchRequest storage request = matchRequests[requestId];
-        require(request.processed && !request.matchDecrypted, "Invalid request state");
+        require(request.processed, "Match calculation not found");
+        require(!request.matchDecrypted, "Match already decrypted");
+        require(msg.sender == request.requester || msg.sender == request.target, "Only involved parties can decrypt");
+
+        // Request decryption using FHENIX's built-in decryption
+        FHE.decrypt(request.isMatchEncrypted);
+
+        emit MatchDecryptionRequested(requestId);
+    }
+
+    /**
+     * @dev Request decryption of similarity score
+     * @param requestId The ID of the match request
+     */
+    function requestScoreDecryption(bytes32 requestId) external {
+        MatchRequest storage request = matchRequests[requestId];
+        require(request.processed, "Match calculation not found");
+        require(!request.scoreDecrypted, "Score already decrypted");
+        require(msg.sender == request.requester || msg.sender == request.target, "Only involved parties can decrypt");
+
+        // Request decryption of similarity score
+        FHE.decrypt(request.similarityScore);
+
+        emit ScoreDecryptionRequested(requestId);
+    }
+
+    /**
+     * @dev Retrieve and process decrypted match result
+     * @param requestId The ID of the match request
+     */
+    function processMatchDecryption(bytes32 requestId) external {
+        MatchRequest storage request = matchRequests[requestId];
+        require(request.processed, "Match calculation not found");
+        require(!request.matchDecrypted, "Match already processed");
+
+        // Get decrypted result safely
+        (bool isMatch, bool ready) = FHE.getDecryptResultSafe(request.isMatchEncrypted);
+        require(ready, "Decryption not ready yet");
 
         request.isMatch = isMatch;
         request.matchDecrypted = true;
@@ -214,52 +211,26 @@ contract BlindMatch {
             emit MatchFound(request.requester, request.target, block.timestamp);
         }
 
-        emit DecryptionCompleted(requestId, isMatch);
+        emit MatchDecrypted(requestId, isMatch);
     }
 
     /**
-     * @dev Decrypt similarity score from a completed match calculation
-     * @param user1 First user in the match calculation
-     * @param user2 Second user in the match calculation
-     * @param timestamp Approximate timestamp of the calculation
-     * @return requestId The ID of the match request
-     */
-    function requestSimilarityScoreDecryption(
-        address user1,
-        address user2,
-        uint256 timestamp
-    ) external returns (bytes32 requestId) {
-        require(msg.sender == user1 || msg.sender == user2, "Only involved parties can decrypt");
-
-        // Generate the result ID
-        requestId = keccak256(abi.encodePacked(user1, user2, timestamp));
-        MatchRequest storage request = matchRequests[requestId];
-
-        require(request.processed, "Match calculation not found or not processed");
-
-        // Request decryption of the similarity score
-        uint256 decryptionId = IOracle(oracle).requestDecryption(
-            uint32(uint256(uint160(bytes20(abi.encodePacked(request.similarityScore))))),
-            this.handleSimilarityScoreDecryption.selector,
-            requestId,
-            block.timestamp + 100
-        );
-
-        pendingDecryptions[decryptionId] = requestId;
-
-        emit DecryptionRequested(requestId, decryptionId);
-
-        return requestId;
-    }
-
-    /**
-     * @dev Callback function for handling similarity score decryption results
+     * @dev Retrieve and process decrypted similarity score
      * @param requestId The ID of the match request
-     * @param score The decrypted similarity score
      */
-    function handleSimilarityScoreDecryption(bytes32 requestId, uint8 score) external onlyOracle {
-        // Handle the decrypted similarity score
-        // You can emit an event or store it if needed
+    function processScoreDecryption(bytes32 requestId) external {
+        MatchRequest storage request = matchRequests[requestId];
+        require(request.processed, "Match calculation not found");
+        require(!request.scoreDecrypted, "Score already processed");
+
+        // Get decrypted result safely
+        (uint8 score, bool ready) = FHE.getDecryptResultSafe(request.similarityScore);
+        require(ready, "Decryption not ready yet");
+
+        request.decryptedScore = score;
+        request.scoreDecrypted = true;
+
+        emit ScoreDecrypted(requestId, score);
     }
 
     /**
@@ -304,7 +275,7 @@ contract BlindMatch {
     }
 
     /**
-     * @dev Get all registered users (for frontend to display potential matches)
+     * @dev Get all registered users
      * @return Array of all user addresses
      */
     function getAllUsers() external view returns (address[] memory) {
@@ -325,26 +296,52 @@ contract BlindMatch {
      * @param requestId The request ID
      * @return requester The address of the requester
      * @return target The address of the target
-     * @return processed Whether the request has been processed
-     * @return timestamp When the request was made
+     * @return processed Whether the match request has been processed
+     * @return timestamp The timestamp of the match request
+     * @return scoreDecrypted Whether the similarity score has been decrypted
+     * @return decryptedScore The decrypted similarity score
+     * @return matchDecrypted Whether the match result has been decrypted
+     * @return isMatch Whether the match result is true
      */
     function getMatchRequest(
         bytes32 requestId
-    ) external view returns (address requester, address target, bool processed, uint256 timestamp) {
+    )
+        external
+        view
+        returns (
+            address requester,
+            address target,
+            bool processed,
+            uint256 timestamp,
+            bool scoreDecrypted,
+            uint8 decryptedScore,
+            bool matchDecrypted,
+            bool isMatch
+        )
+    {
         MatchRequest memory request = matchRequests[requestId];
-        return (request.requester, request.target, request.processed, request.timestamp);
+        return (
+            request.requester,
+            request.target,
+            request.processed,
+            request.timestamp,
+            request.scoreDecrypted,
+            request.decryptedScore,
+            request.matchDecrypted,
+            request.isMatch
+        );
     }
 
     /**
-     * @dev Batch similarity calculation and matching for multiple users
+     * @dev Batch similarity calculation for multiple users
      * @param targets Array of user addresses to calculate similarity with
      * @return requestIds Array of match request IDs for each target
      */
-    function batchCalculateAndMatch(
+    function batchCalculateSimilarity(
         address[] calldata targets
     ) external onlyRegisteredUser returns (bytes32[] memory requestIds) {
         require(targets.length > 0, "No targets provided");
-        require(targets.length <= 10, "Too many targets"); // Limit to prevent gas issues
+        require(targets.length <= 10, "Too many targets"); // Gas limit protection
 
         requestIds = new bytes32[](targets.length);
 
@@ -353,14 +350,14 @@ contract BlindMatch {
             require(targets[i] != msg.sender, "Cannot match with yourself");
             require(!isAlreadyMatched(msg.sender, targets[i]), "Already matched with this user");
 
-            requestIds[i] = this.calculateAndMatch(targets[i]);
+            requestIds[i] = _calculateSimilarity(msg.sender, targets[i]);
         }
 
         return requestIds;
     }
 
     /**
-     * @dev Emergency function to remove a user's profile (only callable by the user)
+     * @dev Emergency function to remove a user's profile
      */
     function deleteProfile() external onlyRegisteredUser {
         delete profiles[msg.sender];
